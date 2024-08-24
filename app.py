@@ -1,10 +1,26 @@
-from flask import Flask, redirect, request, session, url_for, jsonify
+from flask import Flask, redirect, request, session as flask_session, url_for, jsonify
 from cas import CASClient
 import logging
 import os
+import ssl
+import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.poolmanager import PoolManager
+
+class SSLAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        context = ssl.create_default_context()
+        context.set_ciphers('DEFAULT@SECLEVEL=1')  # Abbassa il livello di sicurezza per consentire chiavi DH più piccole
+        kwargs['ssl_context'] = context
+        return super(SSLAdapter, self).init_poolmanager(*args, **kwargs)
+
 
 # Configura il logging
 logging.basicConfig(level=logging.DEBUG)
+
+# Crea una sessione personalizzata
+http_session = requests.Session()
+http_session.mount('https://', SSLAdapter())
 
 app = Flask(__name__)
 #app.secret_key = 'V7nlCN90LPHOTA9PGGyf'  # Assicurati di usare una chiave segreta sicura in produzione
@@ -13,9 +29,10 @@ app.secret_key = os.urandom(24)
 # Configura CASClient
 cas_client = CASClient(
     version=3,
-    service_url='http://localhost:5000/login?next=/profile',  # Cambia con il tuo URL di servizio
+    service_url='http://127.0.0.1:5000/login?next=%2Flogin',  # URL di servizio
     server_url='https://sso.staging.unimi.it:6443/',  # URL del tuo server CAS
-    verify_ssl_certificate=False
+    #verify_ssl_certificate=False
+    session=http_session
 )
 
 @app.route('/')
@@ -27,11 +44,12 @@ def index():
 
 @app.route('/profile')
 def profile():
-    if 'username' in session:
-        username = session['username']
+    if 'username' in flask_session:
+        username = flask_session['username']
         return f'Ciao {username}'
     else:
-        return redirect(url_for('login'))
+        #return redirect(url_for('login'))
+        return f'non ti conosco'
 
 @app.route('/login')
 def cas():
@@ -48,7 +66,7 @@ def cas():
         if next_url:
             cas_login_url += '&next=' + next_url
         return redirect(cas_login_url)
-    app.logger.debug('ticket:', request.args.get('ticket'))
+    #app.logger.debug('ticket:', request.args.get('ticket'))
     
     app.logger.debug('prima del blocco try-catch')
 
@@ -58,21 +76,25 @@ def cas():
     app.logger.debug('next: %s', next_url)
 
     try:
+        app.logger.debug('siamo dentro al try catch')
         app.logger.debug('siamo prima della validazione del ticket')
-        email, attributes, pgtiou = cas_client.verify_ticket(ticket)
-        app.logger.debug('Email: %s', email)
-        session['username'] = email
-        if next_url:
-            return redirect(next_url)
-        else:
-            return redirect(url_for('profile'))
+        user, attributes, pgtiou = cas_client.verify_ticket(ticket)
+        app.logger.debug('Email: %s', user)
+        flask_session['username'] = user
+        #if next_url:
+        #    return redirect(next_url)
+        #else:
+        #    return redirect(url_for('profile'))
+        #print(attributes)
+        app.logger.debug(f"attributes: {attributes}")
+        return jsonify({"attributes": attributes, "user":user})
     except Exception as e:
         app.logger.error('Error verifying ticket: %s', str(e))
         return jsonify({"error": "Login failed. Please try again later.", "success": False}), 500
 
 @app.route('/logout')
 def logout():
-    session.pop('username', None)
+    flask_session.pop('username', None)
     cas_logout_url = cas_client.get_logout_url(url_for('logout_callback', _external=True))
     return redirect(cas_logout_url)
 
